@@ -1,0 +1,7 @@
+{
+  "name": "Matrix Vision",
+  "description": "A real-time camera filter that transforms your world into the Matrix digital rain code.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
