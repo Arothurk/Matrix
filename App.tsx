@@ -11,32 +11,52 @@ const App: React.FC = () => {
   const [currentDeviceId, setCurrentDeviceId] = useState<string>('');
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [captureTrigger, setCaptureTrigger] = useState(0);
-  const [terminalLogs, setTerminalLogs] = useState<string[]>(["System initialized...", "Waiting for camera input..."]);
+  const [terminalLogs, setTerminalLogs] = useState<string[]>(["System initialized...", "Checking hardware access..."]);
   const [showTerminal, setShowTerminal] = useState(true);
-  const [density, setDensity] = useState(14); // Font size / Grid density
-  const [isMirrored, setIsMirrored] = useState(false); // Default to standard view
+  const [density, setDensity] = useState(12); // Reduced from 14 for higher precision (sharper image)
+  const [isMirrored, setIsMirrored] = useState(false); 
 
-  // Initial Camera Setup
+  // Initial Camera Setup & Device Enumeration
   useEffect(() => {
-    const getDevices = async () => {
+    const initializeCamera = async () => {
+      // 1. Check Capability: Browsers block getUserMedia on insecure contexts (HTTP)
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setTerminalLogs(prev => [...prev, "CRITICAL ERROR: Camera API unavailable.", "This app requires a secure context (HTTPS)."]);
+        setAppState(AppState.ERROR);
+        return;
+      }
+
       try {
-        await navigator.mediaDevices.getUserMedia({ video: true }); // Request perm first
+        // 2. Request Permission
+        const initialStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        
+        // Stop initial stream immediately
+        initialStream.getTracks().forEach(track => track.stop());
+
+        // 3. Enumerate Devices
         const allDevices = await navigator.mediaDevices.enumerateDevices();
         const videoDevices = allDevices
           .filter(d => d.kind === 'videoinput')
-          .map(d => ({ deviceId: d.deviceId, label: d.label || `Camera ${d.deviceId.slice(0, 5)}...` }));
+          .map(d => ({ 
+            deviceId: d.deviceId, 
+            label: d.label || `Camera ${d.deviceId.slice(0, 5)}...` 
+          }));
         
         setDevices(videoDevices);
         if (videoDevices.length > 0) {
           setCurrentDeviceId(videoDevices[0].deviceId);
+        } else {
+          setTerminalLogs(prev => [...prev, "ERROR: No camera devices detected."]);
+          setAppState(AppState.ERROR);
         }
       } catch (err) {
-        console.error("Permission denied or no camera", err);
-        setTerminalLogs(prev => [...prev, "ERROR: Camera access denied. Critical system failure."]);
+        console.error("Initialization error:", err);
+        setTerminalLogs(prev => [...prev, "ERROR: Camera access denied or failed."]);
         setAppState(AppState.ERROR);
       }
     };
-    getDevices();
+
+    initializeCamera();
   }, []);
 
   // Switch Camera Stream
@@ -48,19 +68,24 @@ const App: React.FC = () => {
         stream.getTracks().forEach(track => track.stop());
       }
       
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+         setAppState(AppState.ERROR);
+         return;
+      }
+
       try {
         const newStream = await navigator.mediaDevices.getUserMedia({
           video: { 
             deviceId: { exact: currentDeviceId },
-            width: { ideal: 1280 }, // Good balance for performance
+            width: { ideal: 1280 }, 
             height: { ideal: 720 }
           }
         });
         setStream(newStream);
         setAppState(AppState.STREAMING);
-        setTerminalLogs(prev => [...prev, `Video feed connection established: ${currentDeviceId.slice(0,8)}...`]);
+        setTerminalLogs(prev => [...prev, `Video feed connection established.`]);
       } catch (err) {
-        console.error("Stream error", err);
+        console.error("Stream connection error:", err);
         setTerminalLogs(prev => [...prev, "ERROR: Failed to acquire video feed."]);
         setAppState(AppState.ERROR);
       }
@@ -68,10 +93,8 @@ const App: React.FC = () => {
 
     startStream();
     
-    // Cleanup
     return () => {
-      // We don't stop the stream here to avoid flickering when strict mode runs effect twice
-      // Handled by the check at start of function
+      // Stream cleanup handled by next iteration or unmount if needed
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDeviceId]);
@@ -92,7 +115,6 @@ const App: React.FC = () => {
   };
 
   const onFrameCaptured = async (dataUrl: string) => {
-    // Send to Gemini
     try {
       const result = await decodeMatrixImage(dataUrl);
       setTerminalLogs(prev => [...prev, `>> DECODED: ${result}`]);
@@ -104,7 +126,8 @@ const App: React.FC = () => {
   };
 
   const toggleDensity = () => {
-    setDensity(prev => prev === 14 ? 8 : (prev === 8 ? 20 : 14));
+    // Cycle densities: 12 (Default/Sharp) -> 8 (HD/Very Sharp) -> 16 (Retro/Blocky)
+    setDensity(prev => prev === 12 ? 8 : (prev === 8 ? 16 : 12));
     setTerminalLogs(prev => [...prev, `Resolution density adjusted.`]);
   };
 
@@ -118,15 +141,17 @@ const App: React.FC = () => {
       {/* Main Viewport */}
       <div className="flex-1 relative z-0">
         {appState === AppState.ERROR ? (
-          <div className="flex flex-col items-center justify-center h-full space-y-4">
-            <AlertTriangle size={64} className="animate-pulse" />
-            <p className="text-xl font-mono">SIGNAL LOST</p>
-            <p className="text-xs opacity-50">Please allow camera permissions.</p>
+          <div className="flex flex-col items-center justify-center h-full space-y-4 px-4 text-center">
+            <AlertTriangle size={64} className="animate-pulse text-red-500" />
+            <p className="text-xl font-mono text-red-500">SIGNAL LOST / ACCESS DENIED</p>
+            <p className="text-xs opacity-70 max-w-md">
+              Please ensure you are using a secure (HTTPS) connection and have granted camera permissions.
+            </p>
           </div>
         ) : (
           <MatrixCanvas 
             stream={stream} 
-            isActive={appState !== AppState.ERROR} 
+            isActive={appState === AppState.STREAMING || appState === AppState.ANALYZING} 
             onFrameCapture={onFrameCaptured}
             captureTrigger={captureTrigger}
             density={density}
@@ -141,7 +166,7 @@ const App: React.FC = () => {
         <div className="flex justify-between items-start pointer-events-auto">
           <div className="flex flex-col">
             <h1 className="text-2xl sm:text-4xl font-bold tracking-tighter shadow-green-glow">MATRIX VISION</h1>
-            <span className="text-xs text-green-700 animate-pulse">v2.5.0-beta // CONNECTED</span>
+            <span className="text-xs text-green-700 animate-pulse">v2.5.1-stable // ENHANCED</span>
           </div>
           
           <div className="flex gap-2">
@@ -155,7 +180,7 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Center Crosshair (Aesthetic) */}
+        {/* Center Crosshair */}
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-32 h-32 border border-green-500/20 rounded-full flex items-center justify-center pointer-events-none">
            <div className="w-2 h-2 bg-green-500/50 rounded-full"></div>
            <div className="absolute top-0 w-px h-4 bg-green-500/50"></div>
@@ -168,7 +193,6 @@ const App: React.FC = () => {
         <div className="flex flex-col gap-4 pointer-events-auto">
           {/* Action Bar */}
           <div className="flex items-center justify-center gap-6 sm:gap-12 pb-4 sm:pb-8">
-            {/* Density Toggle */}
             <button 
               onClick={toggleDensity}
               className="flex flex-col items-center gap-1 group"
@@ -179,7 +203,6 @@ const App: React.FC = () => {
               <span className="text-[10px] uppercase tracking-widest opacity-70">Grid</span>
             </button>
 
-            {/* Mirror Toggle (New) */}
             <button 
               onClick={toggleMirror}
               className="flex flex-col items-center gap-1 group"
@@ -190,7 +213,6 @@ const App: React.FC = () => {
               <span className="text-[10px] uppercase tracking-widest opacity-70">Flip</span>
             </button>
 
-            {/* Main Action: Analyze */}
             <button 
               onClick={handleCapture}
               disabled={appState === AppState.ANALYZING || appState === AppState.ERROR}
@@ -203,7 +225,6 @@ const App: React.FC = () => {
               <span className="text-xs font-bold uppercase tracking-widest text-green-400 shadow-black drop-shadow-md">Decipher</span>
             </button>
 
-            {/* Camera Switch */}
             <button 
               onClick={handleSwitchCamera}
               className="flex flex-col items-center gap-1 group"
@@ -217,7 +238,6 @@ const App: React.FC = () => {
         </div>
       </div>
       
-      {/* Terminal Drawer */}
       {showTerminal && (
         <TerminalOutput 
           logs={terminalLogs} 
