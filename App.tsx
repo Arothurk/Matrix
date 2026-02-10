@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { RefreshCw, Monitor, Eye, Zap, AlertTriangle, FlipHorizontal } from 'lucide-react';
 import MatrixCanvas from './components/MatrixCanvas';
 import TerminalOutput from './components/TerminalOutput';
@@ -14,10 +14,17 @@ const App: React.FC = () => {
   const [terminalLogs, setTerminalLogs] = useState<string[]>(["System initialized...", "Checking hardware access..."]);
   const [showTerminal, setShowTerminal] = useState(true);
   const [density, setDensity] = useState(12); // Reduced from 14 for higher precision (sharper image)
-  const [isMirrored, setIsMirrored] = useState(false); 
+  const [isMirrored, setIsMirrored] = useState(false);
+  
+  // Ref to track if initialization has run (Strict Mode fix)
+  const initializedRef = useRef(false);
 
   // Initial Camera Setup & Device Enumeration
   useEffect(() => {
+    // Prevent double invocation in React Strict Mode
+    if (initializedRef.current) return;
+    initializedRef.current = true;
+
     const initializeCamera = async () => {
       // 1. Check Capability: Browsers block getUserMedia on insecure contexts (HTTP)
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -27,13 +34,14 @@ const App: React.FC = () => {
       }
 
       try {
+        setTerminalLogs(prev => [...prev, "Requesting camera permissions..."]);
+        
         // 2. Request Permission
+        // We strictly request video: true first to trigger the permission prompt
         const initialStream = await navigator.mediaDevices.getUserMedia({ video: true });
         
-        // Stop initial stream immediately
-        initialStream.getTracks().forEach(track => track.stop());
-
         // 3. Enumerate Devices
+        // IMPORTANT: We do this BEFORE stopping the stream to ensure labels are visible on some browsers (Firefox/Safari)
         const allDevices = await navigator.mediaDevices.enumerateDevices();
         const videoDevices = allDevices
           .filter(d => d.kind === 'videoinput')
@@ -42,16 +50,33 @@ const App: React.FC = () => {
             label: d.label || `Camera ${d.deviceId.slice(0, 5)}...` 
           }));
         
+        // 4. Cleanup Initial Stream
+        // We stop it now because we will start a new one with specific constraints in the next effect
+        initialStream.getTracks().forEach(track => track.stop());
+        
         setDevices(videoDevices);
+        
         if (videoDevices.length > 0) {
+          setTerminalLogs(prev => [...prev, "Hardware access granted.", `${videoDevices.length} devices detected.`]);
+          // This state change will trigger the startStream effect
           setCurrentDeviceId(videoDevices[0].deviceId);
         } else {
-          setTerminalLogs(prev => [...prev, "ERROR: No camera devices detected."]);
+          setTerminalLogs(prev => [...prev, "ERROR: No video input devices found."]);
           setAppState(AppState.ERROR);
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error("Initialization error:", err);
-        setTerminalLogs(prev => [...prev, "ERROR: Camera access denied or failed."]);
+        
+        let errorMsg = "ERROR: Camera access failed.";
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          errorMsg = "ERROR: Permission denied. Please allow camera access.";
+        } else if (err.name === 'NotFoundError') {
+          errorMsg = "ERROR: No camera device found.";
+        } else if (err.name === 'NotReadableError') {
+          errorMsg = "ERROR: Camera is in use by another application.";
+        }
+
+        setTerminalLogs(prev => [...prev, errorMsg]);
         setAppState(AppState.ERROR);
       }
     };
@@ -64,6 +89,7 @@ const App: React.FC = () => {
     if (!currentDeviceId) return;
     
     const startStream = async () => {
+      // Stop existing stream if any
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
@@ -74,19 +100,23 @@ const App: React.FC = () => {
       }
 
       try {
+        setTerminalLogs(prev => [...prev, `Connecting to device: ${currentDeviceId.slice(0,8)}...`]);
+        
         const newStream = await navigator.mediaDevices.getUserMedia({
           video: { 
             deviceId: { exact: currentDeviceId },
             width: { ideal: 1280 }, 
-            height: { ideal: 720 }
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
           }
         });
+        
         setStream(newStream);
         setAppState(AppState.STREAMING);
-        setTerminalLogs(prev => [...prev, `Video feed connection established.`]);
-      } catch (err) {
+        setTerminalLogs(prev => [...prev, "Video feed connection established."]);
+      } catch (err: any) {
         console.error("Stream connection error:", err);
-        setTerminalLogs(prev => [...prev, "ERROR: Failed to acquire video feed."]);
+        setTerminalLogs(prev => [...prev, `ERROR: Failed to open stream. ${err.name}`]);
         setAppState(AppState.ERROR);
       }
     };
@@ -94,15 +124,21 @@ const App: React.FC = () => {
     startStream();
     
     return () => {
-      // Stream cleanup handled by next iteration or unmount if needed
+      // Cleanup happens at start of next call or component unmount
+      // We don't auto-stop here to prevent flickering during strict mode re-renders if not handled by init ref
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDeviceId]);
 
   const handleSwitchCamera = () => {
+    if (devices.length <= 1) {
+      setTerminalLogs(prev => [...prev, "WARN: Only one device available."]);
+      return;
+    }
     const currentIndex = devices.findIndex(d => d.deviceId === currentDeviceId);
     const nextIndex = (currentIndex + 1) % devices.length;
     if (devices[nextIndex]) {
+      setTerminalLogs(prev => [...prev, "Switching video input source..."]);
       setCurrentDeviceId(devices[nextIndex].deviceId);
     }
   };
@@ -145,8 +181,14 @@ const App: React.FC = () => {
             <AlertTriangle size={64} className="animate-pulse text-red-500" />
             <p className="text-xl font-mono text-red-500">SIGNAL LOST / ACCESS DENIED</p>
             <p className="text-xs opacity-70 max-w-md">
-              Please ensure you are using a secure (HTTPS) connection and have granted camera permissions.
+              Check browser permissions. Ensure camera access is allowed and site is HTTPS.
             </p>
+            <button 
+              onClick={() => window.location.reload()}
+              className="mt-4 px-4 py-2 border border-green-700 rounded hover:bg-green-900/50 text-sm"
+            >
+              RETRY CONNECTION
+            </button>
           </div>
         ) : (
           <MatrixCanvas 
@@ -166,7 +208,7 @@ const App: React.FC = () => {
         <div className="flex justify-between items-start pointer-events-auto">
           <div className="flex flex-col">
             <h1 className="text-2xl sm:text-4xl font-bold tracking-tighter shadow-green-glow">MATRIX VISION</h1>
-            <span className="text-xs text-green-700 animate-pulse">v2.5.1-stable // ENHANCED</span>
+            <span className="text-xs text-green-700 animate-pulse">v2.5.2-stable // ONLINE</span>
           </div>
           
           <div className="flex gap-2">
