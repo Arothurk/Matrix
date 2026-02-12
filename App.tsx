@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { RefreshCw, Monitor, Eye, Zap, AlertTriangle, FlipHorizontal, ShieldCheck, ShieldAlert, Wifi, WifiOff } from 'lucide-react';
+import { RefreshCw, Monitor, Eye, Zap, AlertTriangle, FlipHorizontal, ShieldCheck, ShieldAlert, Wifi, WifiOff, Power } from 'lucide-react';
 import MatrixCanvas from './components/MatrixCanvas';
 import TerminalOutput from './components/TerminalOutput';
-import { decodeMatrixImage, checkAIConnection } from './services/gemini';
+import { decodeMatrixImage, checkAIConnection } from './gemini';
 import { AppState, CameraDevice } from './types';
 
 const App: React.FC = () => {
@@ -14,7 +14,7 @@ const App: React.FC = () => {
   const [terminalLogs, setTerminalLogs] = useState<string[]>(["System initialized...", "Booting Matrix interface..."]);
   const [showTerminal, setShowTerminal] = useState(true);
   const [density, setDensity] = useState(12);
-  const [isMirrored, setIsMirrored] = useState(false);
+  const [isMirrored, setIsMirrored] = useState(false); // Default false, but 'user' mode feels better mirrored usually
   
   // Status Indicators
   const [aiConnected, setAiConnected] = useState(false);
@@ -22,107 +22,104 @@ const App: React.FC = () => {
   
   const initializedRef = useRef(false);
 
-  // System Check & AI Initialization
+  // 1. Deployment Self-Check & AI Initialization
   useEffect(() => {
-    // HTTPS Check
+    // HTTPS Check with Alert as requested
     if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
-      console.warn("Security Warning: Application running over HTTP.");
-      setTerminalLogs(prev => [...prev, "WARN: Insecure connection (HTTP) detected.", "Camera access may be restricted by browser security policies."]);
+      const msg = "Security Warning: Camera access requires a secure HTTPS connection. Please use a secure URL.";
+      console.warn(msg);
+      alert(msg); // Explicit user alert
+      setTerminalLogs(prev => [...prev, "CRITICAL: INSECURE CONNECTION (HTTP).", "Camera access blocked by browser security policy."]);
     }
 
-    // AI Check
+    // AI Configuration Check
     const isAIReady = checkAIConnection();
     setAiConnected(isAIReady);
     if (isAIReady) {
       setTerminalLogs(prev => [...prev, "Neural Network interface connected."]);
     } else {
-      setTerminalLogs(prev => [...prev, "WARN: Neural Network interface offline.", "API Key missing. Decoding disabled."]);
+      setTerminalLogs(prev => [...prev, "WAITING FOR CONFIGURATION...", "API_KEY not found."]);
     }
   }, []);
 
-  // Camera Initialization (Decoupled from AI)
+  // 2. Camera Initialization Logic
+  const initializeCamera = async () => {
+    setCameraStatus('PENDING');
+    setAppState(AppState.IDLE);
+    
+    // Browser Capability Check
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setTerminalLogs(prev => [...prev, "CRITICAL ERROR: Camera API unavailable."]);
+      setAppState(AppState.ERROR);
+      setCameraStatus('ERROR');
+      return;
+    }
+
+    try {
+      setTerminalLogs(prev => [...prev, "Requesting visual feed access..."]);
+      
+      // Request Permission - Explicitly asking for 'user' (Front Camera) as requested
+      const initialStream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          facingMode: 'user' 
+        } 
+      });
+      
+      // Enumerate Devices to find others if needed
+      const allDevices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = allDevices
+        .filter(d => d.kind === 'videoinput')
+        .map(d => ({ 
+          deviceId: d.deviceId, 
+          label: d.label || `Device ${d.deviceId.slice(0, 5)}...` 
+        }));
+      
+      // Stop initial stream to switch to the tracked one
+      initialStream.getTracks().forEach(track => track.stop());
+      
+      setDevices(videoDevices);
+      
+      if (videoDevices.length > 0) {
+        setTerminalLogs(prev => [...prev, "Visual sensors detected.", `${videoDevices.length} devices online.`]);
+        
+        // Use the first available device, which usually matches the 'user' request if valid
+        const targetDeviceId = videoDevices[0].deviceId;
+        setCurrentDeviceId(targetDeviceId);
+        setCameraStatus('ACTIVE');
+      } else {
+        setTerminalLogs(prev => [...prev, "ERROR: No visual sensors found."]);
+        setAppState(AppState.ERROR);
+        setCameraStatus('ERROR');
+      }
+    } catch (err: any) {
+      console.error("Camera Init Error:", err);
+      
+      let errorMsg = "ERROR: Sensor access failed.";
+      let status: 'ERROR' | 'DENIED' = 'ERROR';
+
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        errorMsg = "ACCESS DENIED: Permission refused by user.";
+        status = 'DENIED';
+      } else if (err.name === 'NotFoundError') {
+        errorMsg = "ERROR: Sensor device not found.";
+      } else if (err.name === 'NotReadableError') {
+        errorMsg = "ERROR: Sensor occupied by another process.";
+      }
+
+      setTerminalLogs(prev => [...prev, errorMsg]);
+      setAppState(AppState.ERROR);
+      setCameraStatus(status);
+    }
+  };
+
+  // Run init on mount
   useEffect(() => {
     if (initializedRef.current) return;
     initializedRef.current = true;
-
-    const initializeCamera = async () => {
-      // 1. Browser Capability Check
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setTerminalLogs(prev => [...prev, "CRITICAL ERROR: Camera API unavailable.", "Ensure HTTPS or localhost."]);
-        setAppState(AppState.ERROR);
-        setCameraStatus('ERROR');
-        return;
-      }
-
-      try {
-        setTerminalLogs(prev => [...prev, "Requesting visual feed access..."]);
-        
-        // 2. Request Permission with Defensive Constraints
-        // Note: We use a simple constraint first to get the permission prompt without failing on resolution
-        const initialStream = await navigator.mediaDevices.getUserMedia({ 
-          video: { 
-            facingMode: 'environment' // Prefer back camera initially if possible
-          } 
-        });
-        
-        // 3. Enumerate Devices
-        const allDevices = await navigator.mediaDevices.enumerateDevices();
-        const videoDevices = allDevices
-          .filter(d => d.kind === 'videoinput')
-          .map(d => ({ 
-            deviceId: d.deviceId, 
-            label: d.label || `Device ${d.deviceId.slice(0, 5)}...` 
-          }));
-        
-        // Stop the initial stream so we can start the configured one
-        initialStream.getTracks().forEach(track => track.stop());
-        
-        setDevices(videoDevices);
-        
-        if (videoDevices.length > 0) {
-          setTerminalLogs(prev => [...prev, "Visual sensors detected.", `${videoDevices.length} devices online.`]);
-          
-          // Prioritize Back Camera
-          const backCamera = videoDevices.find(d => 
-            d.label.toLowerCase().includes('back') || 
-            d.label.toLowerCase().includes('environment')
-          );
-          
-          const targetDeviceId = backCamera ? backCamera.deviceId : videoDevices[0].deviceId;
-          if (backCamera) setTerminalLogs(prev => [...prev, "Prioritizing rear sensors..."]);
-
-          setCurrentDeviceId(targetDeviceId);
-          setCameraStatus('ACTIVE');
-        } else {
-          setTerminalLogs(prev => [...prev, "ERROR: No visual sensors found."]);
-          setAppState(AppState.ERROR);
-          setCameraStatus('ERROR');
-        }
-      } catch (err: any) {
-        console.error("Camera Init Error:", err);
-        
-        let errorMsg = "ERROR: Sensor access failed.";
-        let status: 'ERROR' | 'DENIED' = 'ERROR';
-
-        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          errorMsg = "ACCESS DENIED: Permission refused by user.";
-          status = 'DENIED';
-        } else if (err.name === 'NotFoundError') {
-          errorMsg = "ERROR: Sensor device not found.";
-        } else if (err.name === 'NotReadableError') {
-          errorMsg = "ERROR: Sensor occupied by another process.";
-        }
-
-        setTerminalLogs(prev => [...prev, errorMsg]);
-        setAppState(AppState.ERROR);
-        setCameraStatus(status);
-      }
-    };
-
     initializeCamera();
   }, []);
 
-  // Stream Handling (When currentDeviceId changes)
+  // 3. Stream Handling
   useEffect(() => {
     if (!currentDeviceId) return;
     
@@ -132,13 +129,14 @@ const App: React.FC = () => {
       }
       
       try {
-        // Robust Constraints
+        // Explicitly setting facingMode: 'user' in constraints if exact device isn't strictly required,
+        // but since we have a deviceId, we use that.
         const constraints = {
           video: { 
             deviceId: { exact: currentDeviceId },
             width: { ideal: 1280 }, 
             height: { ideal: 720 },
-            frameRate: { ideal: 30 } 
+            frameRate: { ideal: 30 }
           }
         };
 
@@ -149,19 +147,16 @@ const App: React.FC = () => {
         setCameraStatus('ACTIVE');
         setTerminalLogs(prev => [...prev, "Visual feed established."]);
       } catch (err: any) {
-        console.warn("Stream connection failed with strict constraints, retrying...", err);
-        
-        // Fallback Strategy
+        console.warn("Stream connection failed, retrying loose...", err);
+        // Fallback
         try {
           const looseStream = await navigator.mediaDevices.getUserMedia({ 
-            video: { deviceId: currentDeviceId } // Try without resolution/frameRate constraints
+            video: { deviceId: currentDeviceId } 
           });
           setStream(looseStream);
           setAppState(AppState.STREAMING);
           setCameraStatus('ACTIVE');
-          setTerminalLogs(prev => [...prev, "Visual feed established (Low Bandwidth Mode)."]);
         } catch (retryErr) {
-          console.error("Fallback failed:", retryErr);
           setAppState(AppState.ERROR);
           setCameraStatus('ERROR');
           setTerminalLogs(prev => [...prev, "CRITICAL: Signal lost."]);
@@ -170,11 +165,7 @@ const App: React.FC = () => {
     };
 
     startStream();
-    
-    // Cleanup function
-    return () => {
-      // Intentionally empty to let the next effect call handle stop/start transition smoothly
-    };
+    return () => {};
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDeviceId]);
 
@@ -190,19 +181,28 @@ const App: React.FC = () => {
 
   const handleCapture = () => {
     if (!aiConnected) {
-      setTerminalLogs(prev => [...prev, "CMD ERROR: AI Offline. Cannot decipher."]);
+      setTerminalLogs(prev => [...prev, "CMD ERROR: AI Config Missing.", "Please check API_KEY."]);
       return;
     }
     setCaptureTrigger(prev => prev + 1);
     setAppState(AppState.ANALYZING);
     setShowTerminal(true);
-    setTerminalLogs(prev => [...prev, "Freezing frame...", "Initiating analysis sequence..."]);
+    setTerminalLogs(prev => [...prev, "Capturing frame...", "Uploading to Construct..."]);
+  };
+
+  const retryConnection = () => {
+    setTerminalLogs(prev => [...prev, "Re-initializing sensor subsystem..."]);
+    initializeCamera();
   };
 
   const onFrameCaptured = async (dataUrl: string) => {
     try {
       const result = await decodeMatrixImage(dataUrl);
-      setTerminalLogs(prev => [...prev, `>> ANALYSIS COMPLETE:`, result]);
+      if (result === "CONFIG_MISSING") {
+         setTerminalLogs(prev => [...prev, ">> ERROR: API KEY NOT CONFIGURED."]);
+      } else {
+         setTerminalLogs(prev => [...prev, `>> ANALYSIS COMPLETE:`, result]);
+      }
     } catch (e) {
       setTerminalLogs(prev => [...prev, ">> ANALYSIS FAILED: Signal corrupted."]);
     } finally {
@@ -225,21 +225,33 @@ const App: React.FC = () => {
       {/* Main Viewport */}
       <div className="flex-1 relative z-0">
         {appState === AppState.ERROR || cameraStatus === 'ERROR' || cameraStatus === 'DENIED' ? (
-          <div className="flex flex-col items-center justify-center h-full space-y-4 px-4 text-center z-20 relative">
+          <div className="flex flex-col items-center justify-center h-full space-y-6 px-4 text-center z-20 relative bg-black/80 backdrop-blur-sm">
             <AlertTriangle size={64} className="animate-pulse text-red-500" />
-            <p className="text-xl font-mono text-red-500">SIGNAL LOST / ACCESS DENIED</p>
-            <p className="text-xs opacity-70 max-w-md font-mono">
-              {cameraStatus === 'DENIED' 
-                ? "Camera permission was blocked. Please reset permissions in your browser settings."
-                : "Secure connection required (HTTPS). Check hardware availability."
-              }
-            </p>
-            <button 
-              onClick={() => window.location.reload()}
-              className="mt-4 px-4 py-2 border border-green-700 rounded hover:bg-green-900/50 text-sm font-mono"
-            >
-              REBOOT SYSTEM
-            </button>
+            <div className="space-y-2">
+              <p className="text-xl font-mono text-red-500 font-bold">SIGNAL LOST / ACCESS DENIED</p>
+              <p className="text-xs opacity-70 max-w-md font-mono mx-auto">
+                {cameraStatus === 'DENIED' 
+                  ? "Camera permission blocked. Check browser settings."
+                  : "Unable to access video device. Check connection and HTTPS."
+                }
+              </p>
+            </div>
+            
+            <div className="flex gap-4">
+              <button 
+                onClick={retryConnection}
+                className="px-6 py-2 border border-green-700 bg-green-900/20 text-green-400 rounded hover:bg-green-900/50 text-sm font-mono flex items-center gap-2"
+              >
+                <Power size={14} /> RECONNECT SENSORS
+              </button>
+              
+              <button 
+                onClick={() => window.location.reload()}
+                className="px-6 py-2 border border-red-900 bg-red-900/10 text-red-500 rounded hover:bg-red-900/30 text-sm font-mono"
+              >
+                SYSTEM REBOOT
+              </button>
+            </div>
           </div>
         ) : (
           <MatrixCanvas 
@@ -268,7 +280,7 @@ const App: React.FC = () => {
                 <span className="text-green-900">|</span>
                 <span className={`flex items-center gap-1 ${aiConnected ? 'text-green-500' : 'text-yellow-600'}`}>
                    {aiConnected ? <Wifi size={12} /> : <WifiOff size={12} />}
-                   AI: {aiConnected ? 'ONLINE' : 'OFFLINE'}
+                   AI: {aiConnected ? 'ONLINE' : 'CONFIG WAIT'}
                 </span>
               </div>
             </div>
@@ -327,7 +339,9 @@ const App: React.FC = () => {
                 {aiConnected && <div className="absolute inset-0 bg-green-500/10 animate-pulse"></div>}
                 <Zap size={32} className={`${aiConnected ? 'text-green-400' : 'text-green-900'} ${appState === AppState.ANALYZING ? 'animate-spin' : ''}`} />
               </div>
-              <span className="text-xs font-bold uppercase tracking-widest text-green-400 shadow-black drop-shadow-md font-mono">Decipher</span>
+              <span className="text-xs font-bold uppercase tracking-widest text-green-400 shadow-black drop-shadow-md font-mono">
+                {appState === AppState.ANALYZING ? 'DECODING' : 'DECIPHER'}
+              </span>
             </button>
 
             <button 

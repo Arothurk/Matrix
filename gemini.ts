@@ -1,25 +1,26 @@
 import { GoogleGenAI } from "@google/genai";
 
 const getApiKey = (): string | undefined => {
-  // Defensive check for API key. 
-  // Per system instructions, we primarily look for process.env.API_KEY.
+  // Standardized Environment Variable
   const key = process.env.API_KEY;
+  
   if (!key) {
     console.warn("Matrix Vision System Warning: API_KEY is missing. AI features will be disabled.");
     return undefined;
   }
   return key;
-}
+};
 
 export const checkAIConnection = (): boolean => {
   return !!process.env.API_KEY;
 };
 
 export const decodeMatrixImage = async (base64Image: string): Promise<string> => {
-  const apiKey = getApiKey();
+  const apiKey = process.env.API_KEY;
   
   if (!apiKey) {
-    return "SYSTEM ERROR: Neural Network Offline. API Key missing in environment variables.";
+    // Return a specific string that the UI can detect to show a friendly configuration prompt
+    return "CONFIG_MISSING";
   }
 
   try {
