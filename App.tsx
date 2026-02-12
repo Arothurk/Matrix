@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { RefreshCw, Monitor, Eye, Zap, AlertTriangle, FlipHorizontal } from 'lucide-react';
+import { RefreshCw, Monitor, Eye, Zap, AlertTriangle, FlipHorizontal, ShieldCheck, ShieldAlert, Wifi, WifiOff } from 'lucide-react';
 import MatrixCanvas from './components/MatrixCanvas';
 import TerminalOutput from './components/TerminalOutput';
-import { decodeMatrixImage } from './services/gemini';
+import { decodeMatrixImage, checkAIConnection } from './services/gemini';
 import { AppState, CameraDevice } from './types';
 
 const App: React.FC = () => {
@@ -11,206 +11,234 @@ const App: React.FC = () => {
   const [currentDeviceId, setCurrentDeviceId] = useState<string>('');
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [captureTrigger, setCaptureTrigger] = useState(0);
-  const [terminalLogs, setTerminalLogs] = useState<string[]>(["System initialized...", "Checking hardware access..."]);
+  const [terminalLogs, setTerminalLogs] = useState<string[]>(["System initialized...", "Booting Matrix interface..."]);
   const [showTerminal, setShowTerminal] = useState(true);
-  const [density, setDensity] = useState(12); // Reduced from 14 for higher precision (sharper image)
+  const [density, setDensity] = useState(12);
   const [isMirrored, setIsMirrored] = useState(false);
   
-  // Ref to track if initialization has run (Strict Mode fix)
+  // Status Indicators
+  const [aiConnected, setAiConnected] = useState(false);
+  const [cameraStatus, setCameraStatus] = useState<'PENDING' | 'ACTIVE' | 'ERROR' | 'DENIED'>('PENDING');
+  
   const initializedRef = useRef(false);
 
-  // Initial Camera Setup & Device Enumeration
+  // System Check & AI Initialization
   useEffect(() => {
-    // Prevent double invocation in React Strict Mode
+    // HTTPS Check
+    if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
+      console.warn("Security Warning: Application running over HTTP.");
+      setTerminalLogs(prev => [...prev, "WARN: Insecure connection (HTTP) detected.", "Camera access may be restricted by browser security policies."]);
+    }
+
+    // AI Check
+    const isAIReady = checkAIConnection();
+    setAiConnected(isAIReady);
+    if (isAIReady) {
+      setTerminalLogs(prev => [...prev, "Neural Network interface connected."]);
+    } else {
+      setTerminalLogs(prev => [...prev, "WARN: Neural Network interface offline.", "API Key missing. Decoding disabled."]);
+    }
+  }, []);
+
+  // Camera Initialization (Decoupled from AI)
+  useEffect(() => {
     if (initializedRef.current) return;
     initializedRef.current = true;
 
     const initializeCamera = async () => {
-      // 1. Check Capability: Browsers block getUserMedia on insecure contexts (HTTP)
+      // 1. Browser Capability Check
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setTerminalLogs(prev => [...prev, "CRITICAL ERROR: Camera API unavailable.", "This app requires a secure context (HTTPS)."]);
+        setTerminalLogs(prev => [...prev, "CRITICAL ERROR: Camera API unavailable.", "Ensure HTTPS or localhost."]);
         setAppState(AppState.ERROR);
+        setCameraStatus('ERROR');
         return;
       }
 
       try {
-        setTerminalLogs(prev => [...prev, "Requesting camera permissions..."]);
+        setTerminalLogs(prev => [...prev, "Requesting visual feed access..."]);
         
-        // 2. Request Permission
-        // We strictly request video: true first to trigger the permission prompt
-        // On mobile, this usually defaults to the front camera, but gives us permission to query others
-        const initialStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        // 2. Request Permission with Defensive Constraints
+        // Note: We use a simple constraint first to get the permission prompt without failing on resolution
+        const initialStream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            facingMode: 'environment' // Prefer back camera initially if possible
+          } 
+        });
         
         // 3. Enumerate Devices
-        // IMPORTANT: We do this BEFORE stopping the stream to ensure labels are visible on some browsers (Firefox/Safari)
         const allDevices = await navigator.mediaDevices.enumerateDevices();
         const videoDevices = allDevices
           .filter(d => d.kind === 'videoinput')
           .map(d => ({ 
             deviceId: d.deviceId, 
-            label: d.label || `Camera ${d.deviceId.slice(0, 5)}...` 
+            label: d.label || `Device ${d.deviceId.slice(0, 5)}...` 
           }));
         
-        // 4. Cleanup Initial Stream
+        // Stop the initial stream so we can start the configured one
         initialStream.getTracks().forEach(track => track.stop());
         
         setDevices(videoDevices);
         
         if (videoDevices.length > 0) {
-          setTerminalLogs(prev => [...prev, "Hardware access granted.", `${videoDevices.length} devices detected.`]);
+          setTerminalLogs(prev => [...prev, "Visual sensors detected.", `${videoDevices.length} devices online.`]);
           
-          // Priority: Try to find a "back" or "environment" camera for the Matrix effect
+          // Prioritize Back Camera
           const backCamera = videoDevices.find(d => 
             d.label.toLowerCase().includes('back') || 
             d.label.toLowerCase().includes('environment')
           );
           
           const targetDeviceId = backCamera ? backCamera.deviceId : videoDevices[0].deviceId;
-          if (backCamera) {
-             setTerminalLogs(prev => [...prev, "Rear camera detected. Prioritizing..."]);
-          }
+          if (backCamera) setTerminalLogs(prev => [...prev, "Prioritizing rear sensors..."]);
 
           setCurrentDeviceId(targetDeviceId);
+          setCameraStatus('ACTIVE');
         } else {
-          setTerminalLogs(prev => [...prev, "ERROR: No video input devices found."]);
+          setTerminalLogs(prev => [...prev, "ERROR: No visual sensors found."]);
           setAppState(AppState.ERROR);
+          setCameraStatus('ERROR');
         }
       } catch (err: any) {
-        console.error("Initialization error:", err);
+        console.error("Camera Init Error:", err);
         
-        let errorMsg = "ERROR: Camera access failed.";
+        let errorMsg = "ERROR: Sensor access failed.";
+        let status: 'ERROR' | 'DENIED' = 'ERROR';
+
         if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          errorMsg = "ERROR: Permission denied. Please allow camera access.";
+          errorMsg = "ACCESS DENIED: Permission refused by user.";
+          status = 'DENIED';
         } else if (err.name === 'NotFoundError') {
-          errorMsg = "ERROR: No camera device found.";
+          errorMsg = "ERROR: Sensor device not found.";
         } else if (err.name === 'NotReadableError') {
-          errorMsg = "ERROR: Camera is in use by another application.";
+          errorMsg = "ERROR: Sensor occupied by another process.";
         }
 
         setTerminalLogs(prev => [...prev, errorMsg]);
         setAppState(AppState.ERROR);
+        setCameraStatus(status);
       }
     };
 
     initializeCamera();
   }, []);
 
-  // Switch Camera Stream
+  // Stream Handling (When currentDeviceId changes)
   useEffect(() => {
     if (!currentDeviceId) return;
     
     const startStream = async () => {
-      // Stop existing stream if any
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
       
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-         setAppState(AppState.ERROR);
-         return;
-      }
-
       try {
-        setTerminalLogs(prev => [...prev, `Connecting to device: ${currentDeviceId.slice(0,8)}...`]);
-        
-        const newStream = await navigator.mediaDevices.getUserMedia({
+        // Robust Constraints
+        const constraints = {
           video: { 
             deviceId: { exact: currentDeviceId },
             width: { ideal: 1280 }, 
             height: { ideal: 720 },
-            // Mobile browsers often override framerate, but we ask for 30
             frameRate: { ideal: 30 } 
           }
-        });
+        };
+
+        const newStream = await navigator.mediaDevices.getUserMedia(constraints);
         
         setStream(newStream);
         setAppState(AppState.STREAMING);
-        setTerminalLogs(prev => [...prev, "Video feed connection established."]);
+        setCameraStatus('ACTIVE');
+        setTerminalLogs(prev => [...prev, "Visual feed established."]);
       } catch (err: any) {
-        console.error("Stream connection error:", err);
-        setTerminalLogs(prev => [...prev, `ERROR: Failed to open stream. ${err.name}`]);
-        // Fallback: Try without exact deviceId if it failed (common on some inconsistent mobile implementations)
+        console.warn("Stream connection failed with strict constraints, retrying...", err);
+        
+        // Fallback Strategy
         try {
-           if (err.name === 'OverconstrainedError' || err.name === 'ConstraintNotSatisfiedError') {
-              setTerminalLogs(prev => [...prev, "Retrying with relaxed constraints..."]);
-              const looseStream = await navigator.mediaDevices.getUserMedia({ video: true });
-              setStream(looseStream);
-              setAppState(AppState.STREAMING);
-           } else {
-              setAppState(AppState.ERROR);
-           }
+          const looseStream = await navigator.mediaDevices.getUserMedia({ 
+            video: { deviceId: currentDeviceId } // Try without resolution/frameRate constraints
+          });
+          setStream(looseStream);
+          setAppState(AppState.STREAMING);
+          setCameraStatus('ACTIVE');
+          setTerminalLogs(prev => [...prev, "Visual feed established (Low Bandwidth Mode)."]);
         } catch (retryErr) {
-           setAppState(AppState.ERROR);
+          console.error("Fallback failed:", retryErr);
+          setAppState(AppState.ERROR);
+          setCameraStatus('ERROR');
+          setTerminalLogs(prev => [...prev, "CRITICAL: Signal lost."]);
         }
       }
     };
 
     startStream();
     
+    // Cleanup function
     return () => {
-      // Cleanup handled by next effect execution or unmount
+      // Intentionally empty to let the next effect call handle stop/start transition smoothly
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDeviceId]);
 
   const handleSwitchCamera = () => {
-    if (devices.length <= 1) {
-      setTerminalLogs(prev => [...prev, "WARN: Only one device available."]);
-      return;
-    }
+    if (devices.length <= 1) return;
     const currentIndex = devices.findIndex(d => d.deviceId === currentDeviceId);
     const nextIndex = (currentIndex + 1) % devices.length;
     if (devices[nextIndex]) {
-      setTerminalLogs(prev => [...prev, "Switching video input source..."]);
+      setTerminalLogs(prev => [...prev, `Switching to sensor ${nextIndex + 1}...`]);
       setCurrentDeviceId(devices[nextIndex].deviceId);
     }
   };
 
   const handleCapture = () => {
+    if (!aiConnected) {
+      setTerminalLogs(prev => [...prev, "CMD ERROR: AI Offline. Cannot decipher."]);
+      return;
+    }
     setCaptureTrigger(prev => prev + 1);
     setAppState(AppState.ANALYZING);
     setShowTerminal(true);
-    setTerminalLogs(prev => [...prev, "Capturing frame for analysis..."]);
+    setTerminalLogs(prev => [...prev, "Freezing frame...", "Initiating analysis sequence..."]);
   };
 
   const onFrameCaptured = async (dataUrl: string) => {
     try {
       const result = await decodeMatrixImage(dataUrl);
-      setTerminalLogs(prev => [...prev, `>> DECODED: ${result}`]);
+      setTerminalLogs(prev => [...prev, `>> ANALYSIS COMPLETE:`, result]);
     } catch (e) {
-      setTerminalLogs(prev => [...prev, ">> DECODING FAILED."]);
+      setTerminalLogs(prev => [...prev, ">> ANALYSIS FAILED: Signal corrupted."]);
     } finally {
       setAppState(AppState.STREAMING);
     }
   };
 
   const toggleDensity = () => {
-    // Cycle densities: 12 (Default/Sharp) -> 8 (HD/Very Sharp) -> 16 (Retro/Blocky)
     setDensity(prev => prev === 12 ? 8 : (prev === 8 ? 16 : 12));
-    setTerminalLogs(prev => [...prev, `Resolution density adjusted.`]);
+    setTerminalLogs(prev => [...prev, `Grid density adjusted.`]);
   };
 
   const toggleMirror = () => {
     setIsMirrored(prev => !prev);
-    setTerminalLogs(prev => [...prev, `Visual feed mirrored: ${!isMirrored}`]);
+    setTerminalLogs(prev => [...prev, `Mirror mode: ${!isMirrored}`]);
   };
 
   return (
     <div className="relative w-screen h-screen bg-black text-green-500 overflow-hidden flex flex-col">
       {/* Main Viewport */}
       <div className="flex-1 relative z-0">
-        {appState === AppState.ERROR ? (
-          <div className="flex flex-col items-center justify-center h-full space-y-4 px-4 text-center">
+        {appState === AppState.ERROR || cameraStatus === 'ERROR' || cameraStatus === 'DENIED' ? (
+          <div className="flex flex-col items-center justify-center h-full space-y-4 px-4 text-center z-20 relative">
             <AlertTriangle size={64} className="animate-pulse text-red-500" />
             <p className="text-xl font-mono text-red-500">SIGNAL LOST / ACCESS DENIED</p>
-            <p className="text-xs opacity-70 max-w-md">
-              Check browser permissions. Ensure camera access is allowed and site is HTTPS.
+            <p className="text-xs opacity-70 max-w-md font-mono">
+              {cameraStatus === 'DENIED' 
+                ? "Camera permission was blocked. Please reset permissions in your browser settings."
+                : "Secure connection required (HTTPS). Check hardware availability."
+              }
             </p>
             <button 
               onClick={() => window.location.reload()}
-              className="mt-4 px-4 py-2 border border-green-700 rounded hover:bg-green-900/50 text-sm"
+              className="mt-4 px-4 py-2 border border-green-700 rounded hover:bg-green-900/50 text-sm font-mono"
             >
-              RETRY CONNECTION
+              REBOOT SYSTEM
             </button>
           </div>
         ) : (
@@ -228,20 +256,32 @@ const App: React.FC = () => {
       {/* Overlay UI */}
       <div className="absolute inset-0 z-10 pointer-events-none flex flex-col justify-between p-4 sm:p-6">
         {/* Header */}
-        <div className="flex justify-between items-start pointer-events-auto">
-          <div className="flex flex-col">
-            <h1 className="text-2xl sm:text-4xl font-bold tracking-tighter shadow-green-glow">MATRIX VISION</h1>
-            <span className="text-xs text-green-700 animate-pulse">v2.5.2-stable // ONLINE</span>
-          </div>
-          
-          <div className="flex gap-2">
-            <button 
-              onClick={() => setShowTerminal(!showTerminal)}
-              className={`p-2 border border-green-800 bg-black/50 backdrop-blur-md rounded hover:bg-green-900/30 transition-colors ${showTerminal ? 'text-green-400' : 'text-green-800'}`}
-              title="Toggle Terminal"
-            >
-              <Monitor size={20} />
-            </button>
+        <div className="flex flex-col gap-2 pointer-events-auto">
+          <div className="flex justify-between items-start">
+            <div className="flex flex-col">
+              <h1 className="text-2xl sm:text-4xl font-bold tracking-tighter shadow-green-glow font-mono">MATRIX VISION</h1>
+              <div className="flex items-center gap-3 text-[10px] sm:text-xs font-mono mt-1">
+                <span className={`flex items-center gap-1 ${cameraStatus === 'ACTIVE' ? 'text-green-500' : 'text-red-500'}`}>
+                   {cameraStatus === 'ACTIVE' ? <ShieldCheck size={12} /> : <ShieldAlert size={12} />}
+                   CAM: {cameraStatus}
+                </span>
+                <span className="text-green-900">|</span>
+                <span className={`flex items-center gap-1 ${aiConnected ? 'text-green-500' : 'text-yellow-600'}`}>
+                   {aiConnected ? <Wifi size={12} /> : <WifiOff size={12} />}
+                   AI: {aiConnected ? 'ONLINE' : 'OFFLINE'}
+                </span>
+              </div>
+            </div>
+            
+            <div className="flex gap-2">
+              <button 
+                onClick={() => setShowTerminal(!showTerminal)}
+                className={`p-2 border border-green-800 bg-black/50 backdrop-blur-md rounded hover:bg-green-900/30 transition-colors ${showTerminal ? 'text-green-400' : 'text-green-800'}`}
+                title="Toggle Terminal"
+              >
+                <Monitor size={20} />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -265,7 +305,7 @@ const App: React.FC = () => {
               <div className="w-12 h-12 rounded-full border border-green-600 bg-black/80 flex items-center justify-center group-active:scale-95 transition-all shadow-[0_0_15px_rgba(0,255,0,0.2)]">
                 <Eye size={20} className="group-hover:text-white transition-colors" />
               </div>
-              <span className="text-[10px] uppercase tracking-widest opacity-70">Grid</span>
+              <span className="text-[10px] uppercase tracking-widest opacity-70 font-mono">Grid</span>
             </button>
 
             <button 
@@ -275,19 +315,19 @@ const App: React.FC = () => {
               <div className={`w-12 h-12 rounded-full border border-green-600 bg-black/80 flex items-center justify-center group-active:scale-95 transition-all shadow-[0_0_15px_rgba(0,255,0,0.2)] ${isMirrored ? 'bg-green-900/40 text-white' : ''}`}>
                 <FlipHorizontal size={20} className="group-hover:text-white transition-colors" />
               </div>
-              <span className="text-[10px] uppercase tracking-widest opacity-70">Flip</span>
+              <span className="text-[10px] uppercase tracking-widest opacity-70 font-mono">Flip</span>
             </button>
 
             <button 
               onClick={handleCapture}
-              disabled={appState === AppState.ANALYZING || appState === AppState.ERROR}
-              className="flex flex-col items-center gap-2 group"
+              disabled={appState === AppState.ANALYZING || appState === AppState.ERROR || !aiConnected}
+              className={`flex flex-col items-center gap-2 group ${!aiConnected ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
-              <div className="w-20 h-20 rounded-full border-2 border-green-400 bg-green-900/20 flex items-center justify-center group-active:scale-90 transition-all shadow-[0_0_30px_rgba(0,255,0,0.4)] relative overflow-hidden">
-                <div className="absolute inset-0 bg-green-500/10 animate-pulse"></div>
-                <Zap size={32} className={`text-green-400 ${appState === AppState.ANALYZING ? 'animate-spin' : ''}`} />
+              <div className={`w-20 h-20 rounded-full border-2 ${aiConnected ? 'border-green-400 bg-green-900/20' : 'border-yellow-900 bg-black'} flex items-center justify-center group-active:scale-90 transition-all shadow-[0_0_30px_rgba(0,255,0,0.4)] relative overflow-hidden`}>
+                {aiConnected && <div className="absolute inset-0 bg-green-500/10 animate-pulse"></div>}
+                <Zap size={32} className={`${aiConnected ? 'text-green-400' : 'text-green-900'} ${appState === AppState.ANALYZING ? 'animate-spin' : ''}`} />
               </div>
-              <span className="text-xs font-bold uppercase tracking-widest text-green-400 shadow-black drop-shadow-md">Decipher</span>
+              <span className="text-xs font-bold uppercase tracking-widest text-green-400 shadow-black drop-shadow-md font-mono">Decipher</span>
             </button>
 
             <button 
@@ -297,7 +337,7 @@ const App: React.FC = () => {
               <div className="w-12 h-12 rounded-full border border-green-600 bg-black/80 flex items-center justify-center group-active:scale-95 transition-all shadow-[0_0_15px_rgba(0,255,0,0.2)]">
                 <RefreshCw size={20} className="group-hover:text-white transition-colors" />
               </div>
-              <span className="text-[10px] uppercase tracking-widest opacity-70">Cam</span>
+              <span className="text-[10px] uppercase tracking-widest opacity-70 font-mono">Cam</span>
             </button>
           </div>
         </div>

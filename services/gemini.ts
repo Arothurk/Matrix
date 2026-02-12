@@ -1,16 +1,29 @@
 import { GoogleGenAI } from "@google/genai";
 
-const getGeminiClient = () => {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) {
-    throw new Error("API_KEY is missing via process.env.API_KEY");
+const getApiKey = (): string | undefined => {
+  // Defensive check for API key. 
+  // Per system instructions, we primarily look for process.env.API_KEY.
+  const key = process.env.API_KEY;
+  if (!key) {
+    console.warn("Matrix Vision System Warning: API_KEY is missing. AI features will be disabled.");
+    return undefined;
   }
-  return new GoogleGenAI({ apiKey });
+  return key;
+}
+
+export const checkAIConnection = (): boolean => {
+  return !!process.env.API_KEY;
 };
 
 export const decodeMatrixImage = async (base64Image: string): Promise<string> => {
+  const apiKey = getApiKey();
+  
+  if (!apiKey) {
+    return "SYSTEM ERROR: Neural Network Offline. API Key missing in environment variables.";
+  }
+
   try {
-    const ai = getGeminiClient();
+    const ai = new GoogleGenAI({ apiKey });
     
     // Clean base64 string if it contains metadata header
     const cleanBase64 = base64Image.replace(/^data:image\/(png|jpeg|jpg);base64,/, '');
