@@ -1,9 +1,9 @@
 import { GoogleGenAI } from "@google/genai";
 
 const getGeminiClient = () => {
-  const apiKey = process.env.API_KEY;
+  const apiKey = process.env.Matrix_api;
   if (!apiKey) {
-    throw new Error("API_KEY is missing via process.env.API_KEY");
+    throw new Error("API_KEY is missing via process.env.Matrix_api");
   }
   return new GoogleGenAI({ apiKey });
 };
