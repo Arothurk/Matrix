@@ -1,9 +1,9 @@
 import { GoogleGenAI } from "@google/genai";
 
 const getGeminiClient = () => {
-  const apiKey = process.env.Matrix_api;
+  const apiKey = process.env.API_KEY;
   if (!apiKey) {
-    throw new Error("API_KEY is missing via process.env.Matrix_api");
+    throw new Error("API_KEY is missing via process.env.API_KEY");
   }
   return new GoogleGenAI({ apiKey });
 };
@@ -16,13 +16,13 @@ export const decodeMatrixImage = async (base64Image: string): Promise<string> =>
     const cleanBase64 = base64Image.replace(/^data:image\/(png|jpeg|jpg);base64,/, '');
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
+      model: 'gemini-3-flash-preview',
       contents: {
         parts: [
           {
             inlineData: {
               data: cleanBase64,
-              mimeType: 'image/jpeg', // Canvas toDataURL usually defaults to png, but we can request jpeg
+              mimeType: 'image/jpeg',
             },
           },
           {

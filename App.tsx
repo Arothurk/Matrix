@@ -38,6 +38,7 @@ const App: React.FC = () => {
         
         // 2. Request Permission
         // We strictly request video: true first to trigger the permission prompt
+        // On mobile, this usually defaults to the front camera, but gives us permission to query others
         const initialStream = await navigator.mediaDevices.getUserMedia({ video: true });
         
         // 3. Enumerate Devices
@@ -51,15 +52,25 @@ const App: React.FC = () => {
           }));
         
         // 4. Cleanup Initial Stream
-        // We stop it now because we will start a new one with specific constraints in the next effect
         initialStream.getTracks().forEach(track => track.stop());
         
         setDevices(videoDevices);
         
         if (videoDevices.length > 0) {
           setTerminalLogs(prev => [...prev, "Hardware access granted.", `${videoDevices.length} devices detected.`]);
-          // This state change will trigger the startStream effect
-          setCurrentDeviceId(videoDevices[0].deviceId);
+          
+          // Priority: Try to find a "back" or "environment" camera for the Matrix effect
+          const backCamera = videoDevices.find(d => 
+            d.label.toLowerCase().includes('back') || 
+            d.label.toLowerCase().includes('environment')
+          );
+          
+          const targetDeviceId = backCamera ? backCamera.deviceId : videoDevices[0].deviceId;
+          if (backCamera) {
+             setTerminalLogs(prev => [...prev, "Rear camera detected. Prioritizing..."]);
+          }
+
+          setCurrentDeviceId(targetDeviceId);
         } else {
           setTerminalLogs(prev => [...prev, "ERROR: No video input devices found."]);
           setAppState(AppState.ERROR);
@@ -107,7 +118,8 @@ const App: React.FC = () => {
             deviceId: { exact: currentDeviceId },
             width: { ideal: 1280 }, 
             height: { ideal: 720 },
-            frameRate: { ideal: 30 }
+            // Mobile browsers often override framerate, but we ask for 30
+            frameRate: { ideal: 30 } 
           }
         });
         
@@ -117,15 +129,26 @@ const App: React.FC = () => {
       } catch (err: any) {
         console.error("Stream connection error:", err);
         setTerminalLogs(prev => [...prev, `ERROR: Failed to open stream. ${err.name}`]);
-        setAppState(AppState.ERROR);
+        // Fallback: Try without exact deviceId if it failed (common on some inconsistent mobile implementations)
+        try {
+           if (err.name === 'OverconstrainedError' || err.name === 'ConstraintNotSatisfiedError') {
+              setTerminalLogs(prev => [...prev, "Retrying with relaxed constraints..."]);
+              const looseStream = await navigator.mediaDevices.getUserMedia({ video: true });
+              setStream(looseStream);
+              setAppState(AppState.STREAMING);
+           } else {
+              setAppState(AppState.ERROR);
+           }
+        } catch (retryErr) {
+           setAppState(AppState.ERROR);
+        }
       }
     };
 
     startStream();
     
     return () => {
-      // Cleanup happens at start of next call or component unmount
-      // We don't auto-stop here to prevent flickering during strict mode re-renders if not handled by init ref
+      // Cleanup handled by next effect execution or unmount
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDeviceId]);
